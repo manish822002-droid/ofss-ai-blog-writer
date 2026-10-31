@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OFSS AI Blog Writer</title>
+<meta name="description" content="Keyword se Bihar-style Hindi mein WordPress-ready blog post banayein.">
+<style>
+:root{font-family:Arial,"Noto Sans Devanagari",sans-serif;color:#172033;background:#f4f7fb}
+*{box-sizing:border-box}body{margin:0}.top{background:#102a43;color:white;padding:25px 16px}
+.wrap{max-width:1050px;margin:auto}.top h1{margin:0 0 8px;font-size:27px}.top p{margin:0;color:#d9e7f4;line-height:1.6}
+main{max-width:1050px;margin:22px auto;padding:0 14px 40px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.panel{background:white;border:1px solid #dce4ee;border-radius:15px;padding:18px;box-shadow:0 4px 18px #102a430b}
+h2{font-size:19px;margin:0 0 16px}label{display:block;font-weight:700;margin:13px 0 7px}
+input,select,textarea{width:100%;padding:11px 12px;border:1px solid #cbd5e1;border-radius:9px;font:inherit;background:white}
+textarea{min-height:105px;resize:vertical;line-height:1.5}#example{min-height:175px}#output{min-height:420px;font-family:Consolas,monospace;font-size:13px}
+button{border:0;border-radius:9px;padding:12px 15px;font:inherit;font-weight:700;cursor:pointer}
+.primary{background:#1769aa;color:white;width:100%;margin-top:17px}.secondary{background:#e8eef5;color:#17324d}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.actions button{flex:1}
+.note{font-size:13px;color:#5c6878;line-height:1.55}.status{font-size:14px;margin-top:12px;white-space:pre-wrap;line-height:1.5}
+footer{max-width:1050px;margin:auto;padding:0 14px 24px;color:#64748b;font-size:12px;line-height:1.5}
+@media(max-width:760px){main{grid-template-columns:1fr}.top h1{font-size:23px}#output{min-height:320px}}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+<h1>OFSS AI Blog Writer</h1>
+<p>Keyword dijiye, apne example article ki style chuniye aur WordPress-ready blog taiyar kijiye.</p>
+</div></header>
+<main>
+<section class="panel">
+<h2>Blog ki details</h2>
+<label for="keyword">Main Keyword *</label>
+<input id="keyword" placeholder="Bihar Board 12th Result 2027" maxlength="300">
+<label for="type">Blog ka type</label>
+<select id="type">
+<option>Bihar Board / Admission / Result / Scholarship / Jobs</option>
+<option>Government Scheme / Sarkari Yojana</option>
+<option>Education / Exam Guide</option>
+<option>General Informational Blog</option>
+<option>Other</option>
+</select>
+<label for="language">Language aur tone</label>
+<select id="language">
+<option>Hindi - Bihar conversational tone</option>
+<option>Simple Hindi</option>
+<option>Hindi + English mix</option>
+<option>English</option>
+</select>
+<label for="words">Article ki length</label>
+<select id="words">
+<option value="800">800 words</option>
+<option value="1200">1,200 words</option>
+<option value="1500" selected>1,500 words</option>
+<option value="2000">2,000 words</option>
+<option value="3000">3,000 words</option>
+<option value="4000">4,000 words</option>
+</select>
+<label for="example">Example Blog Post (optional, lekin style match ke liye useful)</label>
+<textarea id="example" placeholder="Apna pasand ka purana blog post yahan paste karein..."></textarea>
+<label for="facts">Extra facts / official notice se confirmed details</label>
+<textarea id="facts" placeholder="Confirmed dates, eligibility, fees, official notice ki details..."></textarea>
+<label for="sources">Verified official links (optional)</label>
+<textarea id="sources" placeholder="Official URL ya notice link paste karein..."></textarea>
+<p class="note">Tip: Date, last date, fees ya helpline jaisi details official notice se verify karke hi daalein. API key is page par nahi, Render ke Environment settings mein rakhein.</p>
+<button class="primary" id="generate">Blog Post Generate Karein</button>
+<div class="status" id="status" role="status"></div>
+</section>
+<section class="panel">
+<h2>Generated Blog (HTML)</h2>
+<textarea id="output" placeholder="Aapka generated HTML article yahan aayega..." spellcheck="false"></textarea>
+<div class="actions">
+<button class="secondary" id="copy">HTML Copy</button>
+<button class="secondary" id="downloadHtml">Download HTML</button>
+<button class="secondary" id="downloadTxt">Download TXT</button>
+</div>
+<p class="note">HTML Copy karke WordPress ke Custom HTML block mein paste karein. Publish karne se pehle facts, links aur official dates check kar lein.</p>
+</section>
+</main>
+<footer>OFSS AI Blog Writer · AI-generated content ko publish karne se pehle editorial review aur factual verification zaroor karein. AI detector score, AdSense approval ya Google Discover placement ki guarantee nahi hoti.</footer>
+<script>
+const $ = id => document.getElementById(id);
+function safeFilename(s){return (s||"blog-post").toLowerCase().replace(/[^a-z0-9\u0900-\u097f]+/g,"-").replace(/^-|-$/g,"").slice(0,90)||"blog-post"}
+$("generate").addEventListener("click", async () => {
+  const keyword = $("keyword").value.trim();
+  if (!keyword) { $("status").textContent = "Pehle main keyword daliye."; $("keyword").focus(); return; }
+  $("generate").disabled = true; $("generate").textContent = "Article ban raha hai...";
+  $("status").textContent = "AI se article generate ho raha hai. Thoda samay lag sakta hai...";
+  $("output").value = "";
+  try {
+    const res = await fetch("/api/generate", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        keyword, article_type:$("type").value, language:$("language").value,
+        word_count:Number($("words").value), example_article:$("example").value,
+        extra_facts:$("facts").value, verified_sources:$("sources").value
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Request failed");
+    $("output").value = data.article_html || "";
+    $("status").textContent = "Article taiyar hai. Publish karne se pehle facts aur dates verify karein.";
+  } catch(e) {
+    $("status").textContent = "Error: " + e.message + "\nAgar API key abhi set nahi ki hai, Render ke Environment mein GEMINI_API_KEY add karein.";
+  } finally {
+    $("generate").disabled = false; $("generate").textContent = "Blog Post Generate Karein";
+  }
+});
+$("copy").addEventListener("click", async () => {
+  if (!$("output").value) { $("status").textContent = "Pehle article generate karein."; return; }
+  try { await navigator.clipboard.writeText($("output").value); $("status").textContent = "HTML copy ho gaya."; }
+  catch(e) { $("output").select(); document.execCommand("copy"); $("status").textContent = "HTML copy karne ki koshish ki gayi. Agar copy na ho to selected text copy karein."; }
+});
+function download(name, content, type){
+  const blob = new Blob([content],{type});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href=url; a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$("downloadHtml").addEventListener("click",()=>{
+  if(!$("output").value){$("status").textContent="Pehle article generate karein.";return;}
+  download(safeFilename($("keyword").value)+".html","<!doctype html><html lang=\"hi\"><meta charset=\"utf-8\"><body>\n"+$("output").value+"\n</body></html>","text/html;charset=utf-8");
+});
+$("downloadTxt").addEventListener("click",()=>{
+  if(!$("output").value){$("status").textContent="Pehle article generate karein.";return;}
+  const plain=$("output").value.replace(/<br\s*\/?>/gi,"\n").replace(/<\/(p|h1|h2|h3|li|tr|div|article)>/gi,"\n").replace(/<[^>]+>/g,"").replace(/&nbsp;/g," ").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"');
+  download(safeFilename($("keyword").value)+".txt",plain,"text/plain;charset=utf-8");
+});
+</script>
+</body>
+</html>
