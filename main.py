@@ -1,19 +1,20 @@
 import os
-import html
+import re
 import requests
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from pathlib import Path
 
 APP_DIR = Path(__file__).parent
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
 app = FastAPI(
     title="OFSS AI Blog Writer",
-    version="1.0.0",
+    version="1.1.0",
     description="Generate useful, WordPress-ready blog posts in a natural Bihar-style Hindi tone."
 )
 
@@ -50,6 +51,17 @@ def health():
         "model": GEMINI_MODEL
     }
 
+def clean_html_output(text: str) -> str:
+    """Remove common Markdown fences without escaping real HTML tags."""
+    article = (text or "").strip()
+    article = re.sub(r"^\s*```(?:html|HTML)?\s*", "", article)
+    article = re.sub(r"\s*```\s*$", "", article)
+    # Remove accidental leading explanation before the first HTML element.
+    first_tag = re.search(r"<(?:article|div|h1|p)\b", article, flags=re.IGNORECASE)
+    if first_tag:
+        article = article[first_tag.start():]
+    return article.strip()
+
 @app.post("/api/generate")
 def generate_blog(data: BlogRequest):
     if not GEMINI_API_KEY:
@@ -58,9 +70,7 @@ def generate_blog(data: BlogRequest):
             detail="GEMINI_API_KEY set nahi hai. Render ke Environment settings mein API key add karein."
         )
 
-    example = data.example_article.strip() or (
-        "कोई example article नहीं दिया गया है। सरल, स्वाभाविक, बातचीत वाली हिंदी में लिखें।"
-    )
+    example = data.example_article.strip() or "कोई example article नहीं दिया गया है। सरल, स्वाभाविक, बातचीत वाली हिंदी में लिखें।"
     facts = data.extra_facts.strip() or "कोई अतिरिक्त तथ्य नहीं दिए गए।"
     sources = data.verified_sources.strip() or "कोई verified source/official notice नहीं दिया गया।"
 
@@ -79,6 +89,12 @@ LANGUAGE / STYLE:
 TARGET LENGTH:
 लगभग {data.word_count} शब्द। जरूरत हो तो स्पष्टता को शब्द संख्या से अधिक महत्व दें।
 
+EXTRA FACTS:
+{facts}
+
+VERIFIED SOURCES:
+{sources}
+
 EXAMPLE ARTICLE FOR STYLE ANALYSIS:
 <example_article>
 {example}
@@ -86,32 +102,27 @@ EXAMPLE ARTICLE FOR STYLE ANALYSIS:
 
 STYLE RULES:
 - Example को केवल भाषा, टोन, वाक्य की सहजता, पैराग्राफ की लंबाई, पाठक को संबोधित करने के तरीके और heading structure समझने के लिए इस्तेमाल करें।
-- बिहार के पाठकों के लिए स्वाभाविक, आसान, अपनापन वाली हिंदी लिखें। जरूरत के अनुसार “भाई-बहन”, “देखिए”, “चलिए समझते हैं”, “घबराइए मत” जैसे वाक्य कभी-कभी इस्तेमाल कर सकते हैं; हर पैराग्राफ में नहीं।
-- सामान्य प्रचलित English terms जैसे Online Apply, Download Link, Last Date, Correction, Registration Number को जरूरत के अनुसार रखें।
-- भाषा देसी और बातचीत जैसी हो, लेकिन जबरदस्ती की बोली, नकली उच्चारण, अपमानजनक शब्द या जरूरत से ज्यादा slang न डालें।
+- बिहार के पाठकों के लिए स्वाभाविक, आसान, अपनापन वाली हिंदी लिखें।
 - छोटे मोबाइल-फ्रेंडली पैराग्राफ, स्पष्ट H2/H3 headings, उपयोगी lists और जरूरत पड़ने पर overview table रखें।
 - Example के वाक्य या पूरे पैराग्राफ कॉपी न करें। नया लेख मौलिक और विषय के अनुसार लिखें।
-- AI detector के 0% score की गारंटी या detector को धोखा देने के निर्देश न अपनाएं। लक्ष्य स्वाभाविक, उपयोगी, तथ्य-आधारित लेख है।
+- सामान्य प्रचलित English terms जरूरत के अनुसार रखें।
 
-FACTUAL ACCURACY RULES:
+FACTUAL ACCURACY:
 - कोई तारीख, फीस, हेल्पलाइन नंबर, vacancy, link, login method, eligibility, सरकारी घोषणा या correction deadline गढ़कर न लिखें।
 - Extra facts और verified sources को प्राथमिकता दें।
-- अगर कोई जरूरी तथ्य उपलब्ध नहीं है, तो स्पष्ट लिखें कि आधिकारिक नोटिस से पुष्टि करनी होगी। अनुमान को तथ्य की तरह न दिखाएं।
-- Official website का direct link केवल तभी दें जब user ने दिया हो या verified sources में मौजूद हो। अनुमान से URL न बनाएं।
-- किसी घटना या घोषणा को “Out Now”, “जारी हो गया” या “आज से शुरू” तभी कहें जब दिए गए verified sources से पुष्टि होती हो। नहीं तो शीर्षक/लेख में इसे confirmed न बताएं।
-- तारीखें current होने का दावा बिना प्रमाण न करें।
-- SEO keyword स्वाभाविक रूप से उपयोग करें; keyword stuffing न करें।
-- AdSense approval, Google Discover traffic या AI detector score की guarantee न दें।
-- लेख के अंत में छोटा editorial note तभी जोड़ें जब जरूरी तथ्यों की पुष्टि बाकी हो।
+- अगर कोई जरूरी तथ्य उपलब्ध नहीं है, तो साफ लिखें कि आधिकारिक नोटिस से पुष्टि करनी होगी।
+- Official website का direct link केवल तभी दें जब user ने दिया हो या verified sources में मौजूद हो।
+- AdSense approval, traffic या AI detector score की guarantee न दें।
+- SEO keyword स्वाभाविक रूप से उपयोग करें।
 
-OUTPUT FORMAT:
-सिर्फ पूरा HTML fragment दें, Markdown code fences नहीं।
-- <article> के अंदर पूरा लेख रखें।
-- शुरुआत में <h1> SEO title, फिर एक छोटा intro।
-- उसके बाद <h2> headings, जरूरी होने पर <table>, <ol>/<ul>, FAQs और conclusion।
-- SEO Meta Title और Meta Description को article के ऊपर छोटे <div class="seo-meta"> में अलग दिखाएं।
-- WordPress Gutenberg में paste करने लायक clean HTML रखें। Inline scripts न लिखें।
-- अगर facts अपर्याप्त हों तो झूठी निश्चितता के बजाय साफ caveat दें।
+OUTPUT RULES:
+- सिर्फ HTML दें। Markdown code fences (```), Markdown headings या HTML कोड के बाहर की व्याख्या न दें।
+- Output को <article>...</article> के अंदर रखें।
+- SEO Meta Title और Meta Description को <div class="seo-meta"> में रखें, उसके बाद <article> दें।
+- Semantic HTML इस्तेमाल करें: h1, h2, h3, p, ul, ol, table, strong, em.
+- HTML tags को text के रूप में escape न करें। सही HTML markup लौटाएं।
+- Inline scripts या styles न जोड़ें।
+- WordPress में paste करने योग्य clean HTML दें।
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -125,7 +136,7 @@ OUTPUT FORMAT:
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "temperature": 0.85,
+                    "temperature": 0.7,
                     "maxOutputTokens": 10000
                 }
             },
@@ -143,10 +154,14 @@ OUTPUT FORMAT:
 
     try:
         payload = response.json()
-        parts = payload["candidates"][0]["content"]["parts"]
-        article = "\n".join(part.get("text", "") for part in parts).strip()
+        candidate = payload["candidates"][0]
+        parts = candidate["content"]["parts"]
+        article = "\n".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
     except (KeyError, IndexError, TypeError):
         raise HTTPException(status_code=502, detail="AI se response mila, lekin article text read nahi ho paya. Dobara try karein.")
 
-    article = article.removeprefix("```html").removeprefix("```").removesuffix("```").strip()
+    article = clean_html_output(article)
+    if not article:
+        raise HTTPException(status_code=502, detail="AI ne khaali article diya. Dobara try karein.")
+
     return {"article_html": article, "model": GEMINI_MODEL}
