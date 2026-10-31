@@ -1,21 +1,28 @@
+
 import os
 import re
-import requests
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+import requests
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, JSONResponse
 
 APP_DIR = Path(__file__).parent
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL", "gemini-3.5-flash"
+).strip()
+
+GEMINI_TIMEOUT = 100
+MAX_RETRIES = 1
 
 app = FastAPI(
     title="OFSS AI Blog Writer",
-    version="1.1.0",
-    description="Generate useful, WordPress-ready blog posts in a natural Bihar-style Hindi tone."
+    version="2.0.0",
+    description="SEO-friendly Hindi and English blog article generator",
 )
 
 app.add_middleware(
@@ -26,142 +33,382 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class BlogRequest(BaseModel):
-    keyword: str = Field(min_length=2, max_length=300)
-    example_article: str = Field(default="", max_length=30000)
-    article_type: str = Field(default="Bihar Board / Admission / Result / Scholarship / Jobs", max_length=150)
-    language: str = Field(default="Hindi - Bihar conversational tone", max_length=100)
-    word_count: int = Field(default=1500, ge=500, le=5000)
-    extra_facts: str = Field(default="", max_length=12000)
-    verified_sources: str = Field(default="", max_length=5000)
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    path = APP_DIR / "index.html"
-    if not path.exists():
-        return HTMLResponse("<h1>OFSS AI Blog Writer</h1><p>index.html file is missing.</p>", status_code=500)
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+@app.get("/")
+async def home():
+    index_file = APP_DIR / "index.html"
+
+    if not index_file.exists():
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "index.html file not found"},
+        )
+
+    return FileResponse(index_file)
+
 
 @app.get("/api/health")
-def health():
+async def health():
     return {
         "service": "OFSS AI Blog Writer",
         "status": "ok",
         "api_key_configured": bool(GEMINI_API_KEY),
-        "model": GEMINI_MODEL
+        "model": GEMINI_MODEL,
     }
 
-def clean_html_output(text: str) -> str:
-    """Remove common Markdown fences without escaping real HTML tags."""
-    article = (text or "").strip()
-    article = re.sub(r"^\s*```(?:html|HTML)?\s*", "", article)
-    article = re.sub(r"\s*```\s*$", "", article)
-    # Remove accidental leading explanation before the first HTML element.
-    first_tag = re.search(r"<(?:article|div|h1|p)\b", article, flags=re.IGNORECASE)
-    if first_tag:
-        article = article[first_tag.start():]
-    return article.strip()
 
-@app.post("/api/generate")
-def generate_blog(data: BlogRequest):
+def clean_html(text):
+    text = (text or "").strip()
+
+    # Remove Markdown fences if the model adds them.
+    text = re.sub(
+        r"^\s*```(?:html)?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s*```\s*$", "", text)
+
+    return text.strip()
+
+
+def make_prompt(data):
+    keyword = str(
+        data.get("keyword")
+        or data.get("topic")
+        or data.get("title")
+        or ""
+    ).strip()
+
+    language = str(data.get("language", "Hindi")).strip()
+    tone = str(data.get("tone", "natural and conversational")).strip()
+
+    raw_length = (
+        data.get("word_count")
+        or data.get("article_length")
+        or data.get("length")
+        or 1200
+    )
+
+    try:
+        word_count = int(
+            re.search(r"\d+", str(raw_length)).group()
+        )
+    except (AttributeError, ValueError):
+        word_count = 1200
+
+    word_count = max(400, min(word_count, 2500))
+
+    if not keyword:
+        raise HTTPException(
+            status_code=400,
+            detail="Please enter a keyword or article topic.",
+        )
+
+    hindi_rules = ""
+    if language.lower() in ("hindi", "hi", "हिंदी"):
+        hindi_rules = """
+Write in simple, natural Hindi suitable for readers in Bihar.
+Use conversational language, short mobile-friendly paragraphs,
+and common English terms where people naturally use them.
+Avoid robotic, repetitive, exaggerated or overly formal wording.
+Address readers naturally when appropriate.
+"""
+
+    return f"""
+You are the professional Hindi and English content writer
+for OFSS Bihar Board, an independent educational information website.
+
+Write a useful, original, SEO-friendly blog article.
+
+ARTICLE TOPIC / PRIMARY KEYWORD:
+{keyword}
+
+LANGUAGE:
+{language}
+
+TARGET LENGTH:
+Approximately {word_count} words.
+
+WRITING STYLE:
+{tone}
+
+{hindi_rules}
+
+IMPORTANT ACCURACY RULES:
+- Never invent official dates, fees, links, notifications,
+  eligibility rules, statistics or application procedures.
+- Do not claim that unverified information is officially confirmed.
+- If a detail cannot be verified from the supplied information,
+  explain that readers should check the relevant official notice.
+- Do not fabricate citations, sources or URLs.
+- Clearly distinguish general guidance from confirmed facts.
+- This website is independent and is not an official government website.
+
+ARTICLE FORMAT:
+Return a complete HTML fragment with this structure where relevant:
+
+<div class="seo-meta">
+  <p><strong>SEO Meta Title:</strong> ...</p>
+  <p><strong>SEO Meta Description:</strong> ...</p>
+</div>
+
+<article>
+  <h1>Clear, SEO-friendly article title</h1>
+  <p>Helpful introduction answering the reader's main question.</p>
+
+  <h2>Overview</h2>
+  <table>
+    <thead><tr><th>Details</th><th>Information</th></tr></thead>
+    <tbody>...</tbody>
+  </table>
+
+  <h2>Important information</h2>
+  <p>...</p>
+
+  <h2>Eligibility or required documents</h2>
+  <ul><li>...</li></ul>
+
+  <h2>How to check or complete the process</h2>
+  <ol><li>...</li></ol>
+
+  <h2>Important instructions</h2>
+  <ul><li>...</li></ul>
+
+  <h2>Frequently Asked Questions (FAQs)</h2>
+  <h3>Question?</h3>
+  <p>Clear answer.</p>
+
+  <h2>Conclusion</h2>
+  <p>Practical summary and next steps.</p>
+</article>
+
+Adapt headings to the actual topic. Do not include irrelevant
+sections just to fill space. Add 5-7 useful FAQs when appropriate.
+
+HTML OUTPUT RULES:
+- Return HTML only, not Markdown.
+- Do not wrap the output in Markdown code fences.
+- Do not include explanations outside the article.
+- Use valid tags such as h1, h2, h3, p, ul, ol, li, table,
+  thead, tbody, tr, th, td, strong and a.
+- Do not add JavaScript, iframe, form tags or CSS.
+- Do not invent internal or external links.
+- Make the article readable on mobile.
+- Keep SEO title and meta description concise.
+"""
+
+
+def call_gemini(prompt):
     if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=503,
-            detail="GEMINI_API_KEY set nahi hai. Render ke Environment settings mein API key add karein."
+            detail=(
+                "GEMINI_API_KEY is missing in Render Environment. "
+                "Add the key and redeploy."
+            ),
         )
 
-    example = data.example_article.strip() or "कोई example article नहीं दिया गया है। सरल, स्वाभाविक, बातचीत वाली हिंदी में लिखें।"
-    facts = data.extra_facts.strip() or "कोई अतिरिक्त तथ्य नहीं दिए गए।"
-    sources = data.verified_sources.strip() or "कोई verified source/official notice नहीं दिया गया।"
+    model = GEMINI_MODEL.strip()
 
-    prompt = f"""
-आप OFSS Bihar Board वेबसाइट के लिए एक अनुभवी हिंदी ब्लॉग लेखक और संपादक हैं।
-
-USER KEYWORD:
-{data.keyword}
-
-ARTICLE TYPE:
-{data.article_type}
-
-LANGUAGE / STYLE:
-{data.language}
-
-TARGET LENGTH:
-लगभग {data.word_count} शब्द। जरूरत हो तो स्पष्टता को शब्द संख्या से अधिक महत्व दें।
-
-EXTRA FACTS:
-{facts}
-
-VERIFIED SOURCES:
-{sources}
-
-EXAMPLE ARTICLE FOR STYLE ANALYSIS:
-<example_article>
-{example}
-</example_article>
-
-STYLE RULES:
-- Example को केवल भाषा, टोन, वाक्य की सहजता, पैराग्राफ की लंबाई, पाठक को संबोधित करने के तरीके और heading structure समझने के लिए इस्तेमाल करें।
-- बिहार के पाठकों के लिए स्वाभाविक, आसान, अपनापन वाली हिंदी लिखें।
-- छोटे मोबाइल-फ्रेंडली पैराग्राफ, स्पष्ट H2/H3 headings, उपयोगी lists और जरूरत पड़ने पर overview table रखें।
-- Example के वाक्य या पूरे पैराग्राफ कॉपी न करें। नया लेख मौलिक और विषय के अनुसार लिखें।
-- सामान्य प्रचलित English terms जरूरत के अनुसार रखें।
-
-FACTUAL ACCURACY:
-- कोई तारीख, फीस, हेल्पलाइन नंबर, vacancy, link, login method, eligibility, सरकारी घोषणा या correction deadline गढ़कर न लिखें।
-- Extra facts और verified sources को प्राथमिकता दें।
-- अगर कोई जरूरी तथ्य उपलब्ध नहीं है, तो साफ लिखें कि आधिकारिक नोटिस से पुष्टि करनी होगी।
-- Official website का direct link केवल तभी दें जब user ने दिया हो या verified sources में मौजूद हो।
-- AdSense approval, traffic या AI detector score की guarantee न दें।
-- SEO keyword स्वाभाविक रूप से उपयोग करें।
-
-OUTPUT RULES:
-- सिर्फ HTML दें। Markdown code fences (```), Markdown headings या HTML कोड के बाहर की व्याख्या न दें।
-- Output को <article>...</article> के अंदर रखें।
-- SEO Meta Title और Meta Description को <div class="seo-meta"> में रखें, उसके बाद <article> दें।
-- Semantic HTML इस्तेमाल करें: h1, h2, h3, p, ul, ol, table, strong, em.
-- HTML tags को text के रूप में escape न करें। सही HTML markup लौटाएं।
-- Inline scripts या styles न जोड़ें।
-- WordPress में paste करने योग्य clean HTML दें।
-"""
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    try:
-        response = requests.post(
-            url,
-            headers={
-                "x-goog-api-key": GEMINI_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.7,
-                    "maxOutputTokens": 10000
-                }
-            },
-            timeout=180,
+    if not model:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_MODEL is empty in Render Environment.",
         )
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"AI service se connection nahi ho paya: {str(exc)}")
 
-    if response.status_code != 200:
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        f"models/{model}:generateContent"
+    )
+
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.5,
+            "maxOutputTokens": 8192,
+        },
+    }
+
+    last_error = "Unknown Gemini API error"
+
+    for attempt in range(MAX_RETRIES + 1):
         try:
-            detail = response.json().get("error", {}).get("message", response.text)
-        except Exception:
-            detail = response.text
-        raise HTTPException(status_code=502, detail=f"Gemini API error ({response.status_code}): {detail[:900]}")
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=GEMINI_TIMEOUT,
+            )
 
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    candidates = result.get("candidates", [])
+
+                    if not candidates:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=(
+                                "Gemini returned no article. "
+                                "Try a shorter article."
+                            ),
+                        )
+
+                    parts = (
+                        candidates[0]
+                        .get("content", {})
+                        .get("parts", [])
+                    )
+
+                    text = "".join(
+                        part.get("text", "")
+                        for part in parts
+                        if isinstance(part, dict)
+                    ).strip()
+
+                    if not text:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=(
+                                "Gemini returned empty text. "
+                                "Please try again."
+                            ),
+                        )
+
+                    return clean_html(text)
+
+                except HTTPException:
+                    raise
+                except (ValueError, TypeError, KeyError, IndexError):
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Gemini returned an invalid response.",
+                    )
+
+            try:
+                error_json = response.json()
+                message = (
+                    error_json.get("error", {}).get("message")
+                    or response.text[:1000]
+                )
+            except ValueError:
+                message = response.text[:1000]
+
+            last_error = message
+
+            if response.status_code in (429, 503):
+                if attempt < MAX_RETRIES:
+                    time.sleep(2)
+                    continue
+
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Gemini API is temporarily unavailable "
+                        f"(HTTP {response.status_code}). "
+                        f"Details: {message}. Please retry later."
+                    ),
+                )
+
+            if response.status_code in (400, 401, 403, 404):
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Gemini API error ({response.status_code}): "
+                        f"{message}"
+                    ),
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Gemini API error ({response.status_code}): "
+                    f"{message}"
+                ),
+            )
+
+        except requests.Timeout:
+            last_error = "Gemini API request timed out."
+
+            if attempt < MAX_RETRIES:
+                continue
+
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Gemini took too long to respond. "
+                    "Try again with a shorter article."
+                ),
+            )
+
+        except requests.RequestException as exc:
+            last_error = str(exc)
+
+            if attempt < MAX_RETRIES:
+                time.sleep(2)
+                continue
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Could not connect to Gemini API. "
+                    "Please try again later."
+                ),
+            )
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"Gemini request failed: {last_error}",
+    )
+
+
+@app.post("/api/generate")
+async def generate_article(request: Request):
     try:
-        payload = response.json()
-        candidate = payload["candidates"][0]
-        parts = candidate["content"]["parts"]
-        article = "\n".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
-    except (KeyError, IndexError, TypeError):
-        raise HTTPException(status_code=502, detail="AI se response mila, lekin article text read nahi ho paya. Dobara try karein.")
+        content_type = request.headers.get("content-type", "")
 
-    article = clean_html_output(article)
-    if not article:
-        raise HTTPException(status_code=502, detail="AI ne khaali article diya. Dobara try karein.")
+        if "application/json" in content_type:
+            data = await request.json()
+        else:
+            form = await request.form()
+            data = dict(form)
 
-    return {"article_html": article, "model": GEMINI_MODEL}
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid request data.",
+            )
+
+        prompt = make_prompt(data)
+        article_html = call_gemini(prompt)
+
+        return {
+            "article_html": article_html,
+            "html": article_html,
+            "model": GEMINI_MODEL,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        # Avoid exposing secrets or internal server details.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Unexpected server error while generating the article. "
+                "Check Render application logs."
+            ),
+        )
